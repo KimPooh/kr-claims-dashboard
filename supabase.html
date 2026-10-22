@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>건강보험 청구 대시보드 (Supabase)</title>
+<style>
+  :root { --bg:#ffffff; --card:#f6f7f9; --text:#1f2328; --muted:#5b6470; --main:#2f6fdd; --accent:#d1432f; --soft:#9db8ea; --grid:#e3e6ea; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#14171c; --card:#1d2128; --text:#e8eaed; --muted:#9aa3ad; --main:#6ea0ff; --accent:#ff7a66; --soft:#3e5888; --grid:#2c313a; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:24px 16px; background:var(--bg); color:var(--text);
+         font-family:"Pretendard","Malgun Gothic",system-ui,sans-serif; }
+  main { max-width:1080px; margin:0 auto; }
+  h1 { font-size:22px; margin:0 0 6px; line-height:1.4; }
+  .reader { color:var(--muted); font-size:14px; margin:0 0 20px; }
+  .kpis { display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:12px; margin-bottom:16px; }
+  .card { background:var(--card); border-radius:12px; padding:16px; }
+  .kpi .num { font-size:30px; font-weight:700; }
+  .kpi .label { color:var(--muted); font-size:13px; margin-top:4px; }
+  .grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }
+  @media (max-width: 720px) { .grid { grid-template-columns:minmax(0,1fr); } }
+  .card h2 { font-size:15px; margin:0 0 4px; }
+  .card .hint { color:var(--muted); font-size:12px; margin:0 0 10px; }
+  .chart { position:relative; height:300px; }
+  .wide { grid-column:1 / -1; }
+  .insight { border-left:4px solid var(--accent); }
+  .insight p { margin:4px 0; font-size:14px; line-height:1.6; }
+  .source { color:var(--muted); font-size:12px; margin-top:14px; }
+</style>
+</head>
+<body>
+<main>
+  <h1 id="title"></h1>
+  <p class="reader">이 페이지는 <b>만성질환 관리 서비스 기획자</b>가 <b>분기마다</b> <b>어떤 질환·의료기관에 수요와 비용이 몰리는지 점검하기</b> 위해 본다.</p>
+
+  <div class="kpis">
+    <div class="card kpi"><div class="num" id="kpiClaims"></div><div class="label">총 명세서 수 (2024~2025)</div></div>
+    <div class="card kpi"><div class="num" id="kpiAmount"></div><div class="label">총 진료비</div></div>
+    <div class="card kpi"><div class="num" id="kpiPatients"></div><div class="label">수진자 수</div></div>
+  </div>
+
+  <div class="grid">
+    <div class="card">
+      <h2>주상병 상위 10개</h2>
+      <p class="hint">명세서 수 · 만성질환(고혈압·당뇨·고지질혈증)은 빨간색</p>
+      <div class="chart"><canvas id="sickChart" role="img" aria-label="주상병별 명세서 수 상위 10개 가로 막대 그래프"></canvas></div>
+    </div>
+    <div class="card">
+      <h2>의료기관 종별 건당 진료비</h2>
+      <p class="hint">명세서 1건당 평균 진료비(원)</p>
+      <div class="chart"><canvas id="typeChart" role="img" aria-label="의료기관 종별 건당 평균 진료비 막대 그래프"></canvas></div>
+    </div>
+    <div class="card wide">
+      <h2>월별 호흡기 질환 명세서 수</h2>
+      <p class="hint">주상병이 J로 시작하는 명세서 · 겨울(11~3월) 구간은 음영</p>
+      <div class="chart"><canvas id="respChart" role="img" aria-label="월별 호흡기 질환 명세서 수 꺾은선 그래프"></canvas></div>
+    </div>
+    <div class="card wide insight">
+      <h2>한 줄 인사이트</h2>
+      <p id="insight1"></p>
+      <p id="insight2"></p>
+      <p id="insight3"></p>
+    </div>
+  </div>
+
+  <p class="source" id="status">Supabase에서 데이터를 불러오는 중…</p>
+  <p class="source">데이터: 오즈코딩스쿨 실습용 kr_claims(심평원 청구 명세서 구조를 본뜬 가상 데이터, 2024년 1월~2025년 12월). 실제 진료 기록이 아님.</p>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<script>
+  function render(DATA) {
+
+  const css = getComputedStyle(document.documentElement);
+  const color = name => css.getPropertyValue(name).trim();
+  const won = n => n.toLocaleString('ko-KR') + '원';
+  const eok = n => (n / 1e8).toFixed(1) + '억 원';
+  Chart.defaults.color = color('--muted');
+  Chart.defaults.font.family = '"Pretendard","Malgun Gothic",system-ui,sans-serif';
+
+  const first = DATA.topSick[0];
+  const chronic = DATA.topSick.filter(s => /^(I10|E11|E78)/.test(s.code));
+  const chronicCount = chronic.reduce((a, s) => a + s.count, 0);
+
+  document.getElementById('title').textContent =
+    `호흡기 질환은 겨울에 ${DATA.winterRatio}배, 상급종합병원 건당 진료비는 의원의 ${DATA.costRatio}배`;
+  document.getElementById('kpiClaims').textContent = DATA.kpi.claims.toLocaleString('ko-KR') + '건';
+  document.getElementById('kpiAmount').textContent = eok(DATA.kpi.amount);
+  document.getElementById('kpiPatients').textContent = DATA.kpi.patients.toLocaleString('ko-KR') + '명';
+  document.getElementById('insight1').textContent =
+    `가장 많은 주상병은 ${first.name}(${first.code}, ${first.count.toLocaleString('ko-KR')}건)이고, 상위 10개 중 만성질환 3개가 ${chronicCount.toLocaleString('ko-KR')}건을 차지한다 → 꾸준히 관리가 필요한 환자층이 크다.`;
+  document.getElementById('insight2').textContent =
+    `의원 건당 ${won(DATA.perClaim[0].avg)} vs 상급종합병원 ${won(DATA.perClaim.at(-1).avg)} → 만성질환은 의원 단계에서 관리될수록 비용 부담이 작다.`;
+  document.getElementById('insight3').textContent =
+    `호흡기 질환 명세서는 겨울(11~3월) 평균이 여름(6~9월)의 ${DATA.winterRatio}배 → 가을부터 면역·호흡기 관리 콘텐츠를 준비할 시점이다.`;
+
+  new Chart(document.getElementById('sickChart'), {
+    type: 'bar',
+    data: {
+      labels: DATA.topSick.map(s => s.name.length > 14 ? s.name.slice(0, 14) + '…' : s.name),
+      datasets: [{
+        data: DATA.topSick.map(s => s.count),
+        backgroundColor: DATA.topSick.map(s => /^(I10|E11|E78)/.test(s.code) ? color('--accent') : color('--main')),
+        borderRadius: 4
+      }]
+    },
+    options: {
+      indexAxis: 'y', maintainAspectRatio: false,
+      plugins: { legend: { display: false },
+        tooltip: { callbacks: { title: i => DATA.topSick[i[0].dataIndex].name + ' (' + DATA.topSick[i[0].dataIndex].code + ')',
+                                label: c => c.parsed.x.toLocaleString('ko-KR') + '건' } } },
+      scales: { x: { grid: { color: color('--grid') } }, y: { grid: { display: false } } }
+    }
+  });
+
+  new Chart(document.getElementById('typeChart'), {
+    type: 'bar',
+    data: {
+      labels: DATA.perClaim.map(t => t.type),
+      datasets: [{ data: DATA.perClaim.map(t => t.avg), backgroundColor: color('--main'), borderRadius: 4 }]
+    },
+    options: {
+      maintainAspectRatio: false,
+      plugins: { legend: { display: false },
+        tooltip: { callbacks: { label: c => won(c.parsed.y) + ' (명세서 ' + DATA.perClaim[c.dataIndex].count.toLocaleString('ko-KR') + '건)' } } },
+      scales: { y: { grid: { color: color('--grid') }, ticks: { callback: v => (v / 10000) + '만' } }, x: { grid: { display: false } } }
+    }
+  });
+
+  const isWinter = m => [11, 12, 1, 2, 3].includes(+m.slice(5));
+  const winterShade = {
+    id: 'winterShade',
+    beforeDatasetsDraw(chart) {
+      const { ctx, chartArea, scales: { x } } = chart;
+      const step = x.getPixelForValue(1) - x.getPixelForValue(0);
+      ctx.save();
+      ctx.fillStyle = color('--soft');
+      ctx.globalAlpha = 0.25;
+      DATA.resp.forEach((r, i) => {
+        if (isWinter(r.month)) ctx.fillRect(x.getPixelForValue(i) - step / 2, chartArea.top, step, chartArea.bottom - chartArea.top);
+      });
+      ctx.restore();
+    }
+  };
+
+  new Chart(document.getElementById('respChart'), {
+    type: 'line',
+    data: {
+      labels: DATA.resp.map(r => r.month),
+      datasets: [{ data: DATA.resp.map(r => r.count), borderColor: color('--main'), backgroundColor: color('--main'),
+                   borderWidth: 3, tension: 0.25, pointRadius: 3 }]
+    },
+    options: {
+      maintainAspectRatio: false,
+      plugins: { legend: { display: false },
+        tooltip: { callbacks: { label: c => c.parsed.y.toLocaleString('ko-KR') + '건' } } },
+      scales: { y: { beginAtZero: true, grid: { color: color('--grid') } }, x: { grid: { display: false } } }
+    },
+    plugins: [winterShade]
+  });
+}
+
+  const SUPABASE_URL = 'https://zloeadkkjmqukrktsgvh.supabase.co';
+  const SUPABASE_KEY = 'sb_publishable_sKjlC3Qp1YTaHEzBbcQoag_p-z7XiP4';
+
+  async function getTable(name, order) {
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/${name}?select=*&order=${order}`, {
+      headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` }
+    });
+    if (!res.ok) throw new Error(`${name} 불러오기 실패 (${res.status})`);
+    return res.json();
+  }
+
+  async function load() {
+    const status = document.getElementById('status');
+    try {
+      const [kpi, topSick, perClaim, resp] = await Promise.all([
+        getTable('dash_kpi', 'key'),
+        getTable('dash_top_sick', 'rank'),
+        getTable('dash_per_claim', 'ord'),
+        getTable('dash_resp_monthly', 'month')
+      ]);
+      const k = Object.fromEntries(kpi.map(r => [r.key, Number(r.value)]));
+      const avg = list => list.reduce((a, b) => a + b, 0) / list.length;
+      const winter = resp.filter(r => [11, 12, 1, 2, 3].includes(+r.month.slice(5))).map(r => r.claims);
+      const summer = resp.filter(r => [6, 7, 8, 9].includes(+r.month.slice(5))).map(r => r.claims);
+      const per = perClaim.map(r => ({ type: r.type_name, count: r.claims, avg: Math.round(r.total_amount / r.claims) }));
+      render({
+        kpi: { claims: k.claims, amount: k.amount, patients: k.patients },
+        topSick: topSick.map(r => ({ code: r.code, name: r.name, count: r.claims })),
+        perClaim: per,
+        resp: resp.map(r => ({ month: r.month, count: r.claims })),
+        winterRatio: Math.round(avg(winter) / avg(summer) * 10) / 10,
+        costRatio: Math.round(per.at(-1).avg / per[0].avg)
+      });
+      status.textContent = `Supabase에서 실시간으로 불러옴 · ${new Date().toLocaleString('ko-KR')}`;
+    } catch (e) {
+      status.textContent = '데이터를 불러오지 못했습니다: ' + e.message;
+    }
+  }
+
+  load();
+</script>
+</body>
+</html>
